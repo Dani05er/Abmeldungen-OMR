@@ -5,21 +5,26 @@ import { fileURLToPath } from 'url';
 import {
   Client, GatewayIntentBits, EmbedBuilder, ButtonBuilder, ButtonStyle,
   ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle,
-  Events, ChannelType
+  Events
 } from 'discord.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const STATE_PATH = path.join(__dirname, 'state.json');
 
+const ABMELDE_CHANNEL_ID = process.env.ABMELDE_CHANNEL;
+const UEBERSICHT_CHANNEL_ID = process.env.UEBERSICHT_CHANNEL;
+
+if (!process.env.DISCORD_TOKEN || !process.env.GUILD_ID || !ABMELDE_CHANNEL_ID || !UEBERSICHT_CHANNEL_ID) {
+  console.error('Bitte DISCORD_TOKEN, GUILD_ID, ABMELDE_CHANNEL und UEBERSICHT_CHANNEL in der .env setzen.');
+  process.exit(1);
+}
+
 function loadState() {
   try {
     return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
   } catch {
     return {
-      guildId: null,
-      abmeldeChannelId: null,
-      uebersichtChannelId: null,
       lastPanelMessageId: null,
       monthMaps: {} // key: YYYY-MM -> { day(1..31): messageId }
     };
@@ -38,30 +43,16 @@ const MODAL_ID = 'abmelden_modal';
 const FIELD_ZEITRAUM = 'feld_zeitraum';
 const FIELD_GRUND = 'feld_grund';
 
-// ---------- Hilfsfunktionen Datum ----------
-const TZ = 'Europe/Berlin'; // rein informativ; wir parsen Strings in DE-Form
-
+// ---------- Datum & Format ----------
 function pad(n) { return n.toString().padStart(2, '0'); }
-function ymd(date) {
-  const y = date.getFullYear();
-  const m = pad(date.getMonth() + 1);
-  const d = pad(date.getDate());
-  return `${y}-${m}-${d}`;
-}
-function germanDateStr(date) {
-  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()}`;
-}
+function germanDateStr(date) { return `${pad(date.getDate())}.${pad(date.getMonth()+1)}.${date.getFullYear()}`; }
 function weekdayGerman(date) {
   return ['Sonntag','Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag'][date.getDay()];
 }
-function firstDayOfMonth(year, monthIdx0) {
-  return new Date(year, monthIdx0, 1, 12, 0, 0); // 12:00 vermeidet DST-Kanten
-}
-function lastDayOfMonth(year, monthIdx0) {
-  return new Date(year, monthIdx0 + 1, 0, 12, 0, 0);
-}
+function firstDayOfMonth(year, monthIdx0) { return new Date(year, monthIdx0, 1, 12, 0, 0); }
+function lastDayOfMonth(year, monthIdx0) { return new Date(year, monthIdx0 + 1, 0, 12, 0, 0); }
 
-// Erwartete Eingaben:
+// Zeitraum-Parser (DE-Formate):
 // - "TT.MM.JJJJ"
 // - "TT.MM.JJJJ - TT.MM.JJJJ"
 // - "TT.MM.JJJJ HH:MM - TT.MM.JJJJ HH:MM"
@@ -97,8 +88,7 @@ function parseZeitraum(input) {
     const d = parseInt(m[1],10), mo = parseInt(m[2],10), y = parseInt(m[3],10);
     const h = m[4]?parseInt(m[4],10):0, mi = m[5]?parseInt(m[5],10):0;
     start = new Date(y, mo-1, d, h, mi, 0);
-    // ganztägig, falls keine Zeit
-    end = new Date(y, mo-1, d, m[4]?h:23, m[5]?mi:59, 0);
+    end   = new Date(y, mo-1, d, m[4]?h:23, m[5]?mi:59, 0);
     hasTimes = !!m[4];
   } else {
     throw new Error('Ungültiges Format.');
@@ -147,20 +137,13 @@ function buildModal() {
     .setCustomId(MODAL_ID)
     .setTitle('Abwesenheitseintragung');
 
-  const head = new TextInputBuilder()
-    .setCustomId('dummy_header') // “fette, unterstrichene Überschrift”: technisch nicht formatierbar im Feld – wir lösen es im Embed/Titel
-    .setLabel('Abwesenheitseintragung')
-    .setStyle(TextInputStyle.Short)
-    .setValue('— Bitte die Felder unten ausfüllen —')
-    .setRequired(false);
-
-  const rowHead = new ActionRowBuilder().addComponents(head);
-
+  // Discord erlaubt keine fette/unterstrichene Formatierung im Feld-Label selbst.
+  // Wir geben die Überschrift über den Modal-Titel vor.
   const zeitraum = new TextInputBuilder()
     .setCustomId(FIELD_ZEITRAUM)
     .setLabel('Abmeldezeitraum')
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder('z. B. 17.11.2025 09:00 - 18.11.2025 16:00 (keine „unbestimmte Zeit“) ')
+    .setPlaceholder('z. B. 17.11.2025 09:00 - 18.11.2025 16:00 (keine „unbestimmte Zeit“)')
     .setRequired(true);
 
   const grund = new TextInputBuilder()
@@ -173,12 +156,11 @@ function buildModal() {
   const row1 = new ActionRowBuilder().addComponents(zeitraum);
   const row2 = new ActionRowBuilder().addComponents(grund);
 
-  modal.addComponents(rowHead, row1, row2);
+  modal.addComponents(row1, row2);
   return modal;
 }
 
 async function sendOrReplacePanel(channel, state) {
-  // Vorheriges Panel löschen
   if (state.lastPanelMessageId) {
     try {
       const msg = await channel.messages.fetch(state.lastPanelMessageId);
@@ -196,7 +178,7 @@ async function sendOrReplacePanel(channel, state) {
 
 // ---------- Monatsübersichten ----------
 async function ensureMonthOverview(channel, year, monthIdx0, state) {
-  const key = `${year}-${pad(monthIdx0 + 1)}`;
+  const key = `${year}-${(monthIdx0+1).toString().padStart(2,'0')}`;
   if (!state.monthMaps[key]) state.monthMaps[key] = {};
 
   const map = state.monthMaps[key];
@@ -213,7 +195,9 @@ async function ensureMonthOverview(channel, year, monthIdx0, state) {
       '(Einträge werden automatisch ergänzt.)'
     ].join('\n');
 
-    const m = await channel.send({ embeds: [ new EmbedBuilder().setTitle(title).setDescription(body).setColor(0x2f3136) ] });
+    const m = await channel.send({
+      embeds: [ new EmbedBuilder().setTitle(title).setDescription(body).setColor(0x2f3136) ]
+    });
     map[day] = m.id;
   }
   saveState(state);
@@ -222,17 +206,16 @@ async function ensureMonthOverview(channel, year, monthIdx0, state) {
 async function appendToDay(channel, dateObj, line, state) {
   const year = dateObj.getFullYear();
   const monthIdx0 = dateObj.getMonth();
-  const key = `${year}-${pad(monthIdx0 + 1)}`;
+  const key = `${year}-${(monthIdx0+1).toString().padStart(2,'0')}`;
   if (!state.monthMaps[key]) {
     await ensureMonthOverview(channel, year, monthIdx0, state);
   }
   const day = dateObj.getDate();
-  const messageId = state.monthMaps[key][day];
-  if (!messageId) {
+  const msgId = state.monthMaps[key][day];
+  if (!msgId) {
     await ensureMonthOverview(channel, year, monthIdx0, state);
   }
   const msg = await channel.messages.fetch(state.monthMaps[key][day]);
-  // Beschreibung erweitern
   const embed = EmbedBuilder.from(msg.embeds[0] ?? new EmbedBuilder().setColor(0x2f3136));
   const oldDesc = embed.data.description ?? '';
   const newDesc = oldDesc.includes('— Abmeldungen für diesen Tag —')
@@ -242,46 +225,37 @@ async function appendToDay(channel, dateObj, line, state) {
   await msg.edit({ embeds: [embed] });
 }
 
-// ---------- Bot-Logik ----------
-client.once('ready', () => {
+// ---------- Bot-Events ----------
+client.once('ready', async () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
+
+  try {
+    const abmeldeChannel = await client.channels.fetch(ABMELDE_CHANNEL_ID);
+    const uebersichtChannel = await client.channels.fetch(UEBERSICHT_CHANNEL_ID);
+
+    if (!abmeldeChannel || !uebersichtChannel) {
+      console.log('❌ Channel-IDs ungültig oder fehlende Rechte.');
+      return;
+    }
+
+    // Panel direkt platzieren (immer unten halten)
+    await sendOrReplacePanel(abmeldeChannel, loadState());
+
+    // Monatsübersicht für aktuellen Monat sicherstellen
+    const now = new Date();
+    await ensureMonthOverview(uebersichtChannel, now.getFullYear(), now.getMonth(), loadState());
+
+    console.log('✅ Kanäle aus .env geladen und initialisiert.');
+  } catch (e) {
+    console.error('Fehler beim Initialisieren:', e);
+  }
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
-  const state = loadState();
-
-  // /abmeldungen-setup
-  if (interaction.isChatInputCommand() && interaction.commandName === 'abmeldungen-setup') {
-    const abmeldeChannel = interaction.options.getChannel('abmelde_channel', true);
-    const uebersichtChannel = interaction.options.getChannel('uebersicht_channel', true);
-
-    if (abmeldeChannel.type !== ChannelType.GuildText || uebersichtChannel.type !== ChannelType.GuildText) {
-      return interaction.reply({ content: 'Bitte nur Textkanäle auswählen.', ephemeral: true });
-    }
-
-    state.guildId = interaction.guildId;
-    state.abmeldeChannelId = abmeldeChannel.id;
-    state.uebersichtChannelId = uebersichtChannel.id;
-    saveState(state);
-
-    // Panel senden/ersetzen
-    await sendOrReplacePanel(abmeldeChannel, state);
-
-    // Aktuellen Monat anlegen
-    const now = new Date();
-    await ensureMonthOverview(uebersichtChannel, now.getFullYear(), now.getMonth(), state);
-
-    await interaction.reply({ content: 'Setup abgeschlossen ✅', ephemeral: true });
-    return;
-  }
-
-  // Button "Abmelden"
   if (interaction.isButton() && interaction.customId === PANEL_BUTTON_ID) {
-    const modal = buildModal();
-    return interaction.showModal(modal);
+    return interaction.showModal(buildModal());
   }
 
-  // Modal Submit
   if (interaction.isModalSubmit() && interaction.customId === MODAL_ID) {
     const zeitStr = interaction.fields.getTextInputValue(FIELD_ZEITRAUM)?.trim();
     const grundStr = interaction.fields.getTextInputValue(FIELD_GRUND)?.trim();
@@ -293,7 +267,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     let parsed;
     try {
       parsed = parseZeitraum(zeitStr);
-    } catch (e) {
+    } catch {
       return interaction.reply({
         content: 'Ungültiges Zeitraum-Format. Beispiele:\n• `17.11.2025`\n• `17.11.2025 09:00 - 17.11.2025 16:00`\n• `17.11.2025 - 20.11.2025`\n• `17.11.2025 09:00 - 16:00`',
         ephemeral: true
@@ -307,14 +281,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
           ? `${germanDateStr(parsed.start)} (ganztägig)`
           : `${germanDateStr(parsed.start)} - ${germanDateStr(parsed.end)} (ganztägig)`);
 
-    // Post im Abmelde-Channel
     try {
-      const abmeldeChannel = await client.channels.fetch(loadState().abmeldeChannelId);
-      const uebersichtChannel = await client.channels.fetch(loadState().uebersichtChannelId);
-
-      if (!abmeldeChannel || !uebersichtChannel) {
-        return interaction.reply({ content: 'Kanäle nicht konfiguriert. Bitte /abmeldungen-setup ausführen.', ephemeral: true });
-      }
+      const abmeldeChannel = await client.channels.fetch(ABMELDE_CHANNEL_ID);
+      const uebersichtChannel = await client.channels.fetch(UEBERSICHT_CHANNEL_ID);
 
       const entry = [
         '• **Name:** ' + memberMention,
@@ -328,19 +297,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await sendOrReplacePanel(abmeldeChannel, loadState());
 
       // In Übersicht pro Tag eintragen
-      for (const day of eachDayInclusive(new Date(parsed.start.getFullYear(), parsed.start.getMonth(), parsed.start.getDate()), new Date(parsed.end.getFullYear(), parsed.end.getMonth(), parsed.end.getDate()))) {
+      const startDay = new Date(parsed.start.getFullYear(), parsed.start.getMonth(), parsed.start.getDate());
+      const endDay = new Date(parsed.end.getFullYear(), parsed.end.getMonth(), parsed.end.getDate());
+
+      for (const day of eachDayInclusive(startDay, endDay)) {
         let zeitTag = 'ganztägig';
         if (parsed.hasTimes) {
-          // Für Tageszeile eingrenzen
           const from = new Date(day); from.setHours(0,0,0,0);
           const to = new Date(day); to.setHours(23,59,59,999);
-          const start = new Date(Math.max(from.getTime(), parsed.start.getTime()));
-          const end = new Date(Math.min(to.getTime(), parsed.end.getTime()));
-          // Wenn Start/Ende am selben Tag mit Zeit
-          if (start <= end) {
-            const s = `${pad(start.getHours())}:${pad(start.getMinutes())}`;
-            const e = `${pad(end.getHours())}:${pad(end.getMinutes())}`;
-            zeitTag = (s === '00:00' && e === '23:59') ? 'ganztägig' : `${s}–${e}`;
+          const s = new Date(Math.max(from.getTime(), parsed.start.getTime()));
+          const e = new Date(Math.min(to.getTime(), parsed.end.getTime()));
+          if (s <= e) {
+            const ss = `${pad(s.getHours())}:${pad(s.getMinutes())}`;
+            const ee = `${pad(e.getHours())}:${pad(e.getMinutes())}`;
+            zeitTag = (ss === '00:00' && ee === '23:59') ? 'ganztägig' : `${ss}–${ee}`;
           }
         }
         const line = `• ${memberMention} — ${zeitTag} (Grund: ${grundStr || '—'})`;
@@ -353,25 +323,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       console.error(e);
       return interaction.reply({ content: 'Fehler beim Eintragen. Bitte probiere es erneut.', ephemeral: true });
     }
-  }
-});
-
-// Optional: beim Start sicherstellen, dass das Panel existiert (wenn konfiguriert)
-client.on('ready', async () => {
-  const state = loadState();
-  if (state.abmeldeChannelId) {
-    try {
-      const ch = await client.channels.fetch(state.abmeldeChannelId);
-      await sendOrReplacePanel(ch, state);
-    } catch {}
-  }
-  // Monatsübersicht für aktuellen Monat anlegen
-  if (state.uebersichtChannelId) {
-    try {
-      const ch = await client.channels.fetch(state.uebersichtChannelId);
-      const now = new Date();
-      await ensureMonthOverview(ch, now.getFullYear(), now.getMonth(), state);
-    } catch {}
   }
 });
 
