@@ -1,35 +1,19 @@
 import 'dotenv/config';
-import { REST, Routes, SlashCommandBuilder, ChannelType } from 'discord.js';
-
-const commands = [
-  new SlashCommandBuilder()
-    .setName('abmeldungen-setup')
-    .setDescription('Richtet die beiden Channels ein und erstellt Monatsübersichten.')
-    .addChannelOption(opt =>
-      opt.setName('abmelde_channel')
-        .setDescription('Channel A: Interaktives Panel + Einträge')
-        .addChannelTypes(ChannelType.GuildText)
-        .setRequired(true)
-    )
-    .addChannelOption(opt =>
-      opt.setName('uebersicht_channel')
-        .setDescription('Channel B: Tagesübersichten (ein Post pro Tag)')
-        .addChannelTypes(ChannelType.GuildText)
-        .setRequired(true)
-    )
-    .toJSON()
-];
+import { REST, Routes } from 'discord.js';
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
+const commands = []; // absichtlich leer
+
 (async () => {
   try {
+    const app = await rest.get(Routes.oauth2CurrentApplication());
     await rest.put(
-      Routes.applicationGuildCommands((await rest.get(Routes.oauth2CurrentApplication())).id, process.env.GUILD_ID),
+      Routes.applicationGuildCommands(app.id, process.env.GUILD_ID),
       { body: commands }
     );
-    console.log('Slash-Commands registriert.');
+    console.log('Slash-Commands geleert (keine Commands registriert).');
   } catch (e) {
-    console.error(e);
+    console.error('Fehler beim Registrieren der Commands:', e);
   }
 })();
